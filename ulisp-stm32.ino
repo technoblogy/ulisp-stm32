@@ -1,9 +1,9 @@
-/* uLisp STM32 Version 2.3 Beta - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 24th June 2018
+/* uLisp STM32 Version 2.5 - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 28th December 2018
 
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
-
+  
 // Compile options
 
 // #define resetautorun
@@ -20,9 +20,13 @@
 #include <SPI.h>
 #include <Wire.h>
 #include <limits.h>
+#include <EEPROM.h>
 
 #if defined(sdcardsupport)
 #include <SD.h>
+#define SDSIZE 172
+#else
+#define SDSIZE 0
 #endif
 
 // C Macros
@@ -115,9 +119,16 @@ typedef void (*pfun_t)(char);
 #define WORDALIGNED __attribute__((aligned (4)))
 #define BUFFERSIZE 34  // Number of bits+2
 
-#if defined(_VARIANT_ARDUINO_STM32_)
-  #define WORKSPACESIZE 1536              /* Cells (8*bytes) */
-  #define SYMBOLTABLESIZE 512             /* Bytes */
+#if defined(_BOARD_MAPLE_MINI_H_)
+  #define WORKSPACESIZE 1152-SDSIZE       /* Cells (8*bytes) */
+  #define EEPROMSIZE 10240                /* Bytes */
+  #define SYMBOLTABLESIZE 512             /* Bytes - must be even*/
+  uint8_t _end;
+
+#elif defined(_VARIANT_ARDUINO_STM32_)
+  #define WORKSPACESIZE 1472-SDSIZE       /* Cells (8*bytes) */
+  #define EEPROMSIZE 10240                /* Bytes */
+  #define SYMBOLTABLESIZE 512             /* Bytes - must be even*/
   uint8_t _end;
 
 #endif
@@ -145,7 +156,7 @@ char LastPrint = 0;
 char PrintReadably = 1;
 
 // Flags
-enum flag { RETURNFLAG, ESCAPE, EXITEDITOR };
+enum flag { RETURNFLAG, ESCAPE, EXITEDITOR, LIBRARYLOADED };
 volatile char Flags;
 
 // Forward references
@@ -354,108 +365,99 @@ char *MakeFilename (object *arg) {
 }
 
 // Save-image and load-image
+const unsigned int Eeprom = 0x801D800;
 
-#if defined(sdcardsupport)
-void SDWriteInt(File file, int data) {
-  file.write(data & 0xFF); file.write(data>>8 & 0xFF);
+void FlashSetup () {
+  FLASH_Unlock();
+  uint16_t Status;
+  for (int page = Eeprom; page < 0x8020000; page = page + 0x400) {
+    Status = FLASH_ErasePage(page);
+    if (Status != FLASH_COMPLETE) error(PSTR("Flash erase failed"));
+  }
 }
 
-void SDWritePtr(File file, uintptr_t data) {
-  file.write(data & 0xFF); file.write(data>>8 & 0xFF);
-  file.write(data>>16 & 0xFF); file.write(data>>24 & 0xFF);
+void FlashWrite16 (unsigned int *addr, uint16_t data) {
+  uint16_t Status = FLASH_ProgramHalfWord((*addr) + Eeprom, data);
+  if (Status != FLASH_COMPLETE) error(PSTR("Flash write failed"));
+  (*addr) = (*addr) + 2;
 }
-#endif
+
+void FlashWriteInt (unsigned int *addr, int data) {
+  FlashWrite16(addr, data & 0xFFFF); FlashWrite16(addr, data>>16 & 0xFFFF);
+}
+
+uint16_t FlashRead16 (unsigned int *addr) {
+  uint16_t data = (*(__IO uint16*)((*addr) + Eeprom));
+  (*addr) = (*addr) + 2;
+  return data;
+}
+
+int FlashReadInt (unsigned int *addr) {
+  uint16_t b0 = FlashRead16(addr);
+  uint16_t b1 = FlashRead16(addr);
+  return b0 | b1<<16;
+}
 
 int saveimage (object *arg) {
-#if defined(sdcardsupport)
-  SD.begin(SDCARD_SS_PIN);
-  File file;
-  if (stringp(arg)) {
-    file = SD.open(MakeFilename(arg), O_RDWR | O_CREAT | O_TRUNC);
-    arg = NULL;
-  } else file = SD.open("ULISP.IMG", O_RDWR | O_CREAT | O_TRUNC);
-  if (!file) error(PSTR("Problem saving to SD card"));
+  FlashSetup();
   unsigned int imagesize = compactimage(&arg);
-  SDWritePtr(file, (uintptr_t)arg);
-  SDWriteInt(file, imagesize);
-  SDWritePtr(file, (uintptr_t)GlobalEnv);
-  SDWritePtr(file, (uintptr_t)GCStack);
+  // Save to EEPROM
+  int bytesneeded = imagesize*8 + SYMBOLTABLESIZE + 20;
+  if (bytesneeded > EEPROMSIZE) {
+    pfstring(PSTR("Error: Image size too large: "), pserial);
+    pint(imagesize, pserial); pln(pserial);
+    GCStack = NULL;
+    longjmp(exception, 1);
+  }
+  unsigned int addr = 0;
+  FlashWriteInt(&addr, (uintptr_t)arg);
+  FlashWriteInt(&addr, imagesize);
+  FlashWriteInt(&addr, (uintptr_t)GlobalEnv);
+  FlashWriteInt(&addr, (uintptr_t)GCStack);
   #if SYMBOLTABLESIZE > BUFFERSIZE
-  SDWritePtr(file, (uintptr_t)SymbolTop);
-  for (int i=0; i<SYMBOLTABLESIZE; i++) file.write(SymbolTable[i]);
+  FlashWriteInt(&addr, (uintptr_t)SymbolTop);
+  for (int i=0; i<SYMBOLTABLESIZE; i=i+2) FlashWrite16(&addr, SymbolTable[i] | SymbolTable[i+1]<<8);
   #endif
   for (unsigned int i=0; i<imagesize; i++) {
     object *obj = &Workspace[i];
-    SDWritePtr(file, (uintptr_t)car(obj));
-    SDWritePtr(file, (uintptr_t)cdr(obj));
+    FlashWriteInt(&addr, (uintptr_t)car(obj));
+    FlashWriteInt(&addr, (uintptr_t)cdr(obj));
   }
-  file.close();
-  return imagesize;
-#else
-  (void) arg;
-  error(PSTR("save-image not available"));
-  return 0;
-#endif
+  return imagesize; 
 }
-
-#if defined(sdcardsupport)
-unsigned int SDReadInt (File file) {
-  int lo = file.read(); int hi = file.read();
-  return lo | hi<<8;
-}
-
-object *SDReadPtr (File file) {
-  uintptr_t b0 = file.read(); uintptr_t b1 = file.read();
-  uintptr_t b2 = file.read(); uintptr_t b3 = file.read();
-  return (object *)(b0 | b1<<8 | b2<<16 | b3<<24);
-}
-#endif
 
 int loadimage (object *filename) {
-#if defined(sdcardsupport)
-  SD.begin(SDCARD_SS_PIN);
-  File file;
-  if (stringp(filename)) file = SD.open(MakeFilename(filename));
-  else file = SD.open("ULISP.IMG");
-  if (!file) error(PSTR("Problem loading from SD card"));
-  SDReadPtr(file);
-  int imagesize = SDReadInt(file);
-  GlobalEnv = SDReadPtr(file);
-  GCStack = SDReadPtr(file);
+  unsigned int addr = 0;
+  FlashReadInt(&addr); // Skip eval address
+  int imagesize = FlashReadInt(&addr);
+  if (imagesize == 0 || imagesize == 0xFFFF) error(PSTR("No saved image"));
+  GlobalEnv = (object *)FlashReadInt(&addr);
+  GCStack = (object *)FlashReadInt(&addr);
   #if SYMBOLTABLESIZE > BUFFERSIZE
-  SymbolTop = (char *)SDReadPtr(file);
-  for (int i=0; i<SYMBOLTABLESIZE; i++) SymbolTable[i] = file.read();
+  SymbolTop = (char *)FlashReadInt(&addr);
+  for (int i=0; i<SYMBOLTABLESIZE; i=i+2) {
+    uint16_t bytes = FlashRead16(&addr);
+    SymbolTable[i] = bytes & 0xFF;
+    SymbolTable[i+1] = bytes>>8 & 0xFF;
+  }
   #endif
   for (int i=0; i<imagesize; i++) {
     object *obj = &Workspace[i];
-    car(obj) = SDReadPtr(file);
-    cdr(obj) = SDReadPtr(file);
+    car(obj) = (object *)FlashReadInt(&addr);
+    cdr(obj) = (object *)FlashReadInt(&addr);
   }
-  file.close();
   gc(NULL, NULL);
   return imagesize;
-#else
-  (void) filename;
-  error(PSTR("load-image not available"));
-  return 0;
-#endif
 }
 
 void autorunimage () {
-#if defined(sdcardsupport)
-  SD.begin(SDCARD_SS_PIN);
-  File file = SD.open("ULISP.IMG");
-  if (!file) error(PSTR("Error: Problem autorunning from SD card"));
-  object *autorun = SDReadPtr(file);
   object *nullenv = NULL;
-  file.close();
-  if (autorun != NULL) {
-    loadimage(NULL);
+  unsigned int addr = 0;
+  object *autorun = (object *)FlashReadInt(&addr);
+  if (autorun != NULL && (unsigned int)autorun != 0xFFFF) {
+    loadimage(nil);
     apply(autorun, NULL, &nullenv);
   }
-#else
-  error(PSTR("autorun not available"));
-#endif
 }
 
 // Error handling
@@ -887,7 +889,7 @@ void I2Cstop(uint8_t read) {
 // Streams
 
 inline int spiread () { return SPI.transfer(0); }
-#if defined(_VARIANT_ARDUINO_STM32_)
+#if defined(_BOARD_MAPLE_MINI_H_) || defined(_VARIANT_ARDUINO_STM32_)
 inline int serial1read () { while (!Serial1.available()) testescape(); return Serial1.read(); }
 #endif
 #if defined(sdcardsupport)
@@ -903,15 +905,15 @@ inline int SDread () {
 #endif
 
 void serialbegin (int address, int baud) {
-  #if defined(_VARIANT_ARDUINO_STM32_)
+  #if defined(_BOARD_MAPLE_MINI_H_) || defined(_VARIANT_ARDUINO_STM32_)
   if (address == 1) Serial1.begin((long)baud*100);
   else error(PSTR("'with-serial' port not supported"));
   #endif
 }
 
 void serialend (int address) {
-  #if defined(_VARIANT_ARDUINO_STM32_)
-  if (address == 1) Serial1.end();
+  #if defined(_BOARD_MAPLE_MINI_H_) || defined(_VARIANT_ARDUINO_STM32_)
+  if (address == 1) {Serial1.flush(); Serial1.end(); }
   #endif
 }
 
@@ -946,7 +948,7 @@ pfun_t pstreamfun (object *args) {
   int streamtype = SERIALSTREAM;
   int address = 0;
   pfun_t pfun = pserial;
-  if (args != NULL) {
+  if (args != NULL && first(args) != NULL) {
     int stream = istream(first(args));
     streamtype = stream>>8; address = stream & 0xFF;
   }
@@ -966,14 +968,18 @@ pfun_t pstreamfun (object *args) {
 // Check pins
 
 void checkanalogread (int pin) {
-#if defined(_VARIANT_ARDUINO_STM32_)
-  if (!(pin>=10 && pin<=19)) error(PSTR("'analogread' invalid pin"));
+#if defined(_BOARD_MAPLE_MINI_H_)
+  if (!(pin>=3 && pin<=11)) error(PSTR("'analogread' invalid pin"));
+#elif defined(_VARIANT_ARDUINO_STM32_)
+  if (!((pin>=0 && pin<=7) || pin==16)) error(PSTR("'analogread' invalid pin"));
 #endif
 }
 
 void checkanalogwrite (int pin) {
-#if defined(_VARIANT_ARDUINO_STM32_)
-  if (!((pin>=10 && pin<=13) || (pin>=16 && pin<=19) || (pin>=29 && pin<=31) || (pin>=429 && pin<=46))) error(PSTR("'analogwrite' invalid pin"));
+#if defined(_BOARD_MAPLE_MINI_H_)
+  if (!((pin>=3 && pin<=5) || (pin>=8 && pin<=11) || (pin>=15 && pin<=16) || (pin>=25 && pin<=27))) error(PSTR("'analogwrite' invalid pin"));
+#elif defined(_VARIANT_ARDUINO_STM32_)
+  if (!((pin>=0 && pin<=3) || (pin>=6 && pin<=10) || pin==16 || (pin>=22 && pin<=23))) error(PSTR("'analogwrite' invalid pin"));
 #endif
 }
 
@@ -1369,6 +1375,7 @@ object *tf_return (object *args, object *env) {
 }
 
 object *tf_if (object *args, object *env) {
+  if (args == NULL || cdr(args) == NULL) error(PSTR("'if' missing argument(s)"));
   if (eval(first(args), env) != nil) return second(args);
   args = cddr(args);
   return (args != NULL) ? first(args) : nil;
@@ -1377,6 +1384,7 @@ object *tf_if (object *args, object *env) {
 object *tf_cond (object *args, object *env) {
   while (args != NULL) {
     object *clause = first(args);
+    if (!consp(clause)) error2(clause, PSTR("is an illegal clause"));
     object *test = eval(first(clause), env);
     object *forms = cdr(clause);
     if (test != nil) {
@@ -1388,11 +1396,13 @@ object *tf_cond (object *args, object *env) {
 }
 
 object *tf_when (object *args, object *env) {
+  if (args == NULL) error(PSTR("'when' missing argument"));
   if (eval(first(args), env) != nil) return tf_progn(cdr(args),env);
   else return nil;
 }
 
 object *tf_unless (object *args, object *env) {
+  if (args == NULL) error(PSTR("'unless' missing argument"));
   if (eval(first(args), env) != nil) return nil;
   else return tf_progn(cdr(args),env);
 }
@@ -2217,7 +2227,9 @@ object *fn_round (object *args, object *env) {
 
 object *fn_char (object *args, object *env) {
   (void) env;
-  char c = nthchar(first(args), integer(second(args)));
+  object *arg = first(args);
+  if (!stringp(arg)) error2(arg, PSTR("is not a string"));
+  char c = nthchar(arg, integer(second(args)));
   if (c == 0) error(PSTR("'char' index out of range"));
   return character(c);
 }
@@ -2312,7 +2324,8 @@ object *fn_stringfn (object *args, object *env) {
   if (type == CHARACTER) {
     object *cell = myalloc();
     cell->car = NULL;
-    cell->integer = fromchar(arg)<<8;
+    uint8_t shift = (sizeof(int)-1)*8;
+    cell->integer = fromchar(arg)<<shift;
     obj->cdr = cell;
   } else if (type == SYMBOL) {
     char *s = name(arg);
@@ -2505,7 +2518,7 @@ object *fn_makunbound (object *args, object *env) {
   (void) env;
   object *key = first(args);
   deletesymbol(key->name);
-  return delassoc(key, &GlobalEnv);
+  return (delassoc(key, &GlobalEnv) != NULL) ? tee : nil;
 }
 
 object *fn_break (object *args, object *env) {
@@ -2660,8 +2673,12 @@ object *fn_pinmode (object *args, object *env) {
   (void) env;
   int pin = integer(first(args));
   object *mode = second(args);
-  if (integerp(mode)) pinMode(pin, mode->integer);
-  else pinMode(pin, (mode != nil));
+  if ((integerp(mode) && mode->integer == 1) || mode != nil) pinMode(pin, OUTPUT);
+  else if (integerp(mode) && mode->integer == 2) pinMode(pin, INPUT_PULLUP);
+  #if defined(INPUT_PULLDOWN)
+  else if (integerp(mode) && mode->integer == 4) pinMode(pin, INPUT_PULLDOWN);
+  #endif
+  else pinMode(pin, INPUT);
   return nil;
 }
 
@@ -2775,7 +2792,7 @@ int atomwidth (object *obj) {
 }
 
 boolean quoted (object *obj) {
-  return (consp(obj) && (car(obj)->name == QUOTE) && consp(cdr(obj)) && (cddr(obj) == NULL));
+  return (consp(obj) && car(obj) != NULL && car(obj)->name == QUOTE && consp(cdr(obj)) && cddr(obj) == NULL);
 }
 
 int subwidth (object *obj, int w) {
@@ -2795,7 +2812,7 @@ int subwidthlist (object *form, int w) {
 
 void superprint (object *form, int lm, pfun_t pfun) {
   if (atom(form)) {
-    if (form->name == NOTHING) pstring(name(form), pfun);
+    if (symbolp(form) && form->name == NOTHING) pstring(name(form), pfun);
     else printobject(form, pfun);
   }
   else if (quoted(form)) { pfun('\''); superprint(car(cdr(form)), lm + 1, pfun); }
@@ -2845,11 +2862,9 @@ object *fn_pprintall (object *args, object *env) {
     object *pair = first(globals);
     object *var = car(pair);
     object *val = cdr(pair);
-    object *head = car(val);
-    object *function = cdr(val);
-    if (head->name == LAMBDA) {
+    if (listp(val) && symbolp(car(val)) && car(val)->name == LAMBDA) {
       pln(pserial);
-      superprint(cons(symbol(DEFUN), cons(var, function)), 0, pserial);
+      superprint(cons(symbol(DEFUN), cons(var, cdr(val))), 0, pserial);
       pln(pserial);
     }
     globals = cdr(globals);
@@ -3286,7 +3301,7 @@ object *eval (object *form, object *env) {
   EVAL:
   // Enough space?
   if (End != 0xA5) error(PSTR("Stack overflow"));
-  if (Freespace < 20) gc(form, env);
+  if (Freespace <= WORKSPACESIZE>>4) gc(form, env);
   // Escape
   if (tstflag(ESCAPE)) { clrflag(ESCAPE); error(PSTR("Escape!"));}
   #if defined (serialmonitor)
@@ -3772,7 +3787,7 @@ void setup () {
   initworkspace();
   initenv();
   initsleep();
-  pfstring(PSTR("uLisp 2.3 "), pserial); pln(pserial);
+  pfstring(PSTR("uLisp 2.5 "), pserial); pln(pserial);
 }
 
 // Read/Evaluate/Print loop
@@ -3814,12 +3829,13 @@ void loop () {
     if (autorun == 12) autorunimage();
   }
   // Come here after error
+  delay(100); while (Serial.available()) Serial.read();
   for (int i=0; i<TRACEMAX; i++) TraceDepth[i] = 0;
   #if defined(sdcardsupport)
   SDpfile.close(); SDgfile.close();
   #endif
   #if defined(lisplibrary)
-  loadfromlibrary(NULL);
+  if (!tstflag(LIBRARYLOADED)) { setflag(LIBRARYLOADED); loadfromlibrary(NULL); }
   #endif
   repl(NULL);
 }
