@@ -1,5 +1,5 @@
 /* uLisp STM32 Version 2.6a - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 19th April 2019
+   David Johnson-Davies - www.technoblogy.com - 20th April 2019
 
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -548,17 +548,26 @@ void autorunimage () {
 
 // Error handling
 
-void error (const char *string) {
+void error (PGM_P string) {
   pfl(pserial); pfstring(PSTR("Error: "), pserial);
   pfstring(string, pserial); pln(pserial);
   GCStack = NULL;
   longjmp(exception, 1);
 }
 
-void error2 (object *symbol, const char *string) {
+void error2 (object *symbol, PGM_P string) {
   pfl(pserial); pfstring(PSTR("Error: "), pserial);
   if (symbol == NULL) pfstring(PSTR("function "), pserial);
   else { pserial('\''); printobject(symbol, pserial); pfstring(PSTR("' "), pserial); }
+  pfstring(string, pserial); pln(pserial);
+  GCStack = NULL;
+  longjmp(exception, 1);
+}
+
+void error3 (symbol_t name, PGM_P string) {
+  pfl(pserial); pfstring(PSTR("Error: "), pserial);
+  if (symbol == NULL) pfstring(PSTR("function "), pserial);
+  else { pserial('\''); pstring(lookupbuiltin(name), pserial); pfstring(PSTR("' "), pserial); }
   pfstring(string, pserial); pln(pserial);
   GCStack = NULL;
   longjmp(exception, 1);
@@ -983,7 +992,7 @@ bool I2Cstart(uint8_t address, uint8_t read) {
 }
 
 bool I2Crestart(uint8_t address, uint8_t read) {
-  int error = (Wire.endTransmission(true) != 0);
+  int error = (Wire.endTransmission(false) != 0);
   if (read == 0) Wire.beginTransmission(address);
   else Wire.requestFrom(address, I2CCount);
   return error ? false : true;
@@ -2825,7 +2834,7 @@ object *fn_pinmode (object *args, object *env) {
     else if (nmode == 4) pm = INPUT_PULLDOWN;
     #endif
   } else if (mode != nil) pm = OUTPUT;
-  pinMode(pin, pm);
+  pinMode(pin, (WiringPinMode)pm);
   return nil;
 }
 
