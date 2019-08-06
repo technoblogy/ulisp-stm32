@@ -1,5 +1,5 @@
-/* uLisp STM32 Version 2.8 - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 20th July 2019
+/* uLisp STM32 Version 2.8a - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 6th August 2019
 
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -123,7 +123,7 @@ typedef void (*pfun_t)(char);
 #define BUFFERSIZE 34  // Number of bits+2
 
 #if defined(_BOARD_MAPLE_MINI_H_)
-  #define WORKSPACESIZE 1150-SDSIZE       /* Cells (8*bytes) */
+  #define WORKSPACESIZE 1130-SDSIZE       /* Cells (8*bytes) */
   #define EEPROMSIZE 10240                /* Bytes */
   #define SYMBOLTABLESIZE 512             /* Bytes - must be even*/
   uint8_t _end;
@@ -921,12 +921,12 @@ object *apply (symbol_t name, object *function, object *args, object *env) {
     checkargs(fname, args);
     return ((fn_ptr_type)lookupfn(fname))(args, env);
   }
-  if (listp(function) && issymbol(car(function), LAMBDA)) {
+  if (consp(function) && issymbol(car(function), LAMBDA)) {
     function = cdr(function);
     object *result = closure(0, 0, NULL, function, args, &env);
     return eval(result, env);
   }
-  if (listp(function) && issymbol(car(function), CLOSURE)) {
+  if (consp(function) && issymbol(car(function), CLOSURE)) {
     function = cdr(function);
     object *result = closure(0, 0, car(function), cdr(function), args, &env);
     return eval(result, env);
@@ -1471,7 +1471,7 @@ object *sp_withspi (object *args, object *env) {
 object *sp_withsdcard (object *args, object *env) {
 #if defined(sdcardsupport)
   object *params = first(args);
-  if (params == NULL) error2(WITHSPCARD, nostream);
+  if (params == NULL) error2(WITHSDCARD, nostream);
   object *var = first(params);
   object *filename = eval(second(params), env);
   params = cddr(params);
@@ -1482,10 +1482,10 @@ object *sp_withsdcard (object *args, object *env) {
   if (mode == 1) oflag = O_RDWR | O_CREAT | O_APPEND; else if (mode == 2) oflag = O_RDWR | O_CREAT | O_TRUNC;
   if (mode >= 1) {
     SDpfile = SD.open(MakeFilename(filename), oflag);
-    if (!SDpfile) error2(WITHSPCARD, PSTR("problem writing to SD card"));
+    if (!SDpfile) error2(WITHSDCARD, PSTR("problem writing to SD card"));
   } else {
     SDgfile = SD.open(MakeFilename(filename), oflag);
-    if (!SDgfile) error2(WITHSPCARD, PSTR("problem reading from SD card"));
+    if (!SDgfile) error2(WITHSDCARD, PSTR("problem reading from SD card"));
   }
   object *pair = cons(var, stream(SDSTREAM, 1));
   push(pair,env);
@@ -3571,7 +3571,7 @@ object *eval (object *form, object *env) {
   object *function = car(form);
   object *args = cdr(form);
 
-  if (function == NULL) error2(0, PSTR("'nil' illegal function"));
+  if (function == NULL) error(0, PSTR("illegal function"), nil);
   if (!listp(args)) error(0, PSTR("can't evaluate a dotted pair"), args);
 
   // List starts with a symbol?
@@ -3654,7 +3654,7 @@ object *eval (object *form, object *env) {
     return result;
   }
       
-  if (listp(function) && issymbol(car(function), LAMBDA)) {
+  if (consp(function) && issymbol(car(function), LAMBDA)) {
     form = closure(TCstart, fname->name, NULL, cdr(function), args, &env);
     pop(GCStack);
     int trace = tracing(fname->name);
@@ -3672,7 +3672,7 @@ object *eval (object *form, object *env) {
     }
   }
 
-  if (listp(function) && issymbol(car(function), CLOSURE)) {
+  if (consp(function) && issymbol(car(function), CLOSURE)) {
     function = cdr(function);
     form = closure(TCstart, fname->name, car(function), cdr(function), args, &env);
     pop(GCStack);
@@ -3680,7 +3680,7 @@ object *eval (object *form, object *env) {
     goto EVAL;
   } 
   
-  error2((int)fname, PSTR("is an illegal function")); return nil;
+  error(0, PSTR("illegal function"), fname); return nil;
 }
 
 // Print functions
@@ -3921,7 +3921,7 @@ object *nextitem (gfun_t gfun) {
     else if (ch == 'B') base = 2;
     else if (ch == 'O') base = 8;
     else if (ch == 'X') base = 16;
-    else if (ch == 0x07) return (object *)QUO;
+    else if (ch == 0x07) return nextitem(gfun);
     else error2(0, PSTR("Illegal character after #"));
     ch = gfun();
   }
