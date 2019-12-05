@@ -1,5 +1,5 @@
-/* uLisp STM32 Version 2.9 - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 25th September 2019
+/* uLisp STM32 Version 3.0 - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 5th December 2019
 
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -160,7 +160,7 @@ char LastPrint = 0;
 
 // Flags
 enum flag { PRINTREADABLY, RETURNFLAG, ESCAPE, EXITEDITOR, LIBRARYLOADED };
-volatile char Flags;
+volatile char Flags = 0b00001; // PRINTREADABLY set by default
 
 // Forward references
 object *tee;
@@ -2712,8 +2712,8 @@ object *fn_locals (object *args, object *env) {
 object *fn_makunbound (object *args, object *env) {
   (void) env;
   object *key = first(args);
-  deletesymbol(key->name);
-  return (delassoc(key, &GlobalEnv) != NULL) ? tee : nil;
+  delassoc(key, &GlobalEnv);
+  return key;
 }
 
 object *fn_break (object *args, object *env) {
@@ -3922,13 +3922,15 @@ object *nextitem (gfun_t gfun) {
     if (ch == ' ') return (object *)DOT;
     isfloat = true;
   } else if (ch == '#') {
-    ch = gfun() & ~0x20;
+    ch = gfun();
+    char ch2 = ch & ~0x20; // force to upper case
     if (ch == '\\') base = 0; // character
-    else if (ch == 'B') base = 2;
-    else if (ch == 'O') base = 8;
-    else if (ch == 'X') base = 16;
-    else if (ch == 0x07) return nextitem(gfun);
-    else error2(0, PSTR("Illegal character after #"));
+    else if (ch2 == 'B') base = 2;
+    else if (ch2 == 'O') base = 8;
+    else if (ch2 == 'X') base = 16;
+    else if (ch == '\'') return nextitem(gfun);
+    else if (ch == '.') return eval(read(gfun), NULL);
+    else error2(0, PSTR("illegal character after #"));
     ch = gfun();
   }
   int valid; // 0=undecided, -1=invalid, +1=valid
@@ -4036,7 +4038,7 @@ void setup () {
   initworkspace();
   initenv();
   initsleep();
-  pfstring(PSTR("uLisp 2.8 "), pserial); pln(pserial);
+  pfstring(PSTR("uLisp 3.0 "), pserial); pln(pserial);
 }
 
 // Read/Evaluate/Print loop
